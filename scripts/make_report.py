@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-实验报告 PDF 生成器。
+实验报告 PDF 生成器（增强版）。
 
 用法：
     py scripts/make_report.py <input.json> [output.pdf]
 
-输入为 JSON 文件，结构见 example/example_report.json。
+输入 JSON 结构见 SKILL.md 与 example/。
+支持：封面、摘要/关键词、公式编号、注意事项框、参考文献、页眉页脚、表格隔行底纹。
 依赖：reportlab（中文字体用系统自带的 宋体/黑体/楷体/仿宋）。
 """
 import json
@@ -14,14 +15,14 @@ import os
 
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import cm
-from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
+from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_RIGHT
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib import colors
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfbase.pdfmetrics import registerFontFamily
 from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table,
-                                TableStyle, Image, PageBreak, KeepTogether)
+                                TableStyle, Image, PageBreak)
 from reportlab.lib.utils import ImageReader
 
 FONT_DIR = "C:/Windows/Fonts"
@@ -30,11 +31,10 @@ LEFT = RIGHT = 2.0 * cm
 TOP = BOTTOM = 2.5 * cm
 USABLE_W = PAGE_W - LEFT - RIGHT
 
-# ---------------------------------------------------------------- 字体注册
 _FONT_CANDIDATES = [
-    ("SimSun", "simsun.ttc", 0),   # 宋体（正文）
+    ("SimSun", "simsun.ttc", 0),     # 宋体（正文）
     ("SimHei", "simhei.ttf", None),  # 黑体（标题/加粗）
-    ("SimKai", "simkai.ttf", None),  # 楷体
+    ("SimKai", "simkai.ttf", None),  # 楷体（封面/摘要/注意）
     ("SimFang", "simfang.ttf", None),  # 仿宋
 ]
 
@@ -49,7 +49,6 @@ for _name, _fn, _sub in _FONT_CANDIDATES:
         except Exception as _e:
             print(f"[warn] 注册字体失败 {_fn}: {_e}", file=sys.stderr)
 
-# 正文字体族：正常用宋体，加粗用黑体
 try:
     registerFontFamily("Body", normal="SimSun", bold="SimHei",
                        italic="SimSun", boldItalic="SimHei")
@@ -58,10 +57,11 @@ except Exception:
 
 BODY = "SimSun"
 HEI = "SimHei"
+KAI = "SimKai"
 
 
 def esc_amp(s):
-    """转义 & （允许 <b>/<i>/<sub>/<super> 等标记）。"""
+    """转义 &（保留 <b>/<i>/<sub>/<super> 标记）。"""
     if s is None:
         return ""
     return str(s).replace("&", "&amp;")
@@ -74,19 +74,37 @@ def esc_all(s):
     return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
 
+def spaced(s, sep=" "):
+    """字符间加空格，用于封面标题的拉宽排版。"""
+    return sep.join(str(s))
+
+
 # ---------------------------------------------------------------- 样式
-S_TITLE = ParagraphStyle("title", fontName=HEI, fontSize=16, leading=24,
-                         alignment=TA_CENTER, spaceAfter=6)
-S_META = ParagraphStyle("meta", fontName=BODY, fontSize=10.5, leading=18,
-                        alignment=TA_CENTER)
+S_COVER_COURSE = ParagraphStyle("covercourse", fontName=KAI, fontSize=16,
+                                leading=24, alignment=TA_CENTER)
+S_COVER_TITLE = ParagraphStyle("covertitle", fontName=HEI, fontSize=30,
+                               leading=44, alignment=TA_CENTER)
+S_COVER_META = ParagraphStyle("covermeta", fontName=KAI, fontSize=14,
+                              leading=32, alignment=TA_CENTER)
+S_ABSTRACT = ParagraphStyle("abstract", fontName=KAI, fontSize=10, leading=16,
+                            alignment=TA_JUSTIFY, spaceAfter=3)
+S_KEYWORDS = ParagraphStyle("keywords", fontName=KAI, fontSize=10, leading=16)
+S_NOTE = ParagraphStyle("note", fontName=KAI, fontSize=10, leading=16)
 S_HEADING = ParagraphStyle("heading", fontName=HEI, fontSize=12, leading=18,
                            spaceBefore=12, spaceAfter=6)
+S_SUBHEADING = ParagraphStyle("subheading", fontName=HEI, fontSize=11,
+                              leading=16, spaceBefore=8, spaceAfter=4)
 S_BODY = ParagraphStyle("body", fontName=BODY, fontSize=10.5, leading=17,
                         alignment=TA_JUSTIFY, firstLineIndent=21, spaceAfter=4)
 S_FORMULA = ParagraphStyle("formula", fontName=BODY, fontSize=11, leading=18,
                            alignment=TA_CENTER, spaceBefore=6, spaceAfter=6)
+S_FORMULA_CELL = ParagraphStyle("formulacell", fontName=BODY, fontSize=11,
+                                leading=18, alignment=TA_CENTER)
+S_FORMULA_NUM = ParagraphStyle("formulanum", fontName=BODY, fontSize=11,
+                               leading=18, alignment=TA_RIGHT)
 S_CAPTION = ParagraphStyle("caption", fontName=BODY, fontSize=9, leading=13,
-                           alignment=TA_CENTER, textColor=colors.HexColor("#444444"),
+                           alignment=TA_CENTER,
+                           textColor=colors.HexColor("#444444"),
                            spaceBefore=2, spaceAfter=8)
 S_LIST = ParagraphStyle("list", fontName=BODY, fontSize=10.5, leading=17,
                         leftIndent=16, spaceAfter=2)
@@ -94,22 +112,29 @@ S_CELL = ParagraphStyle("cell", fontName=BODY, fontSize=9.5, leading=13,
                         alignment=TA_CENTER)
 S_CELL_H = ParagraphStyle("cellh", fontName=HEI, fontSize=9.5, leading=13,
                           alignment=TA_CENTER)
+S_REF = ParagraphStyle("ref", fontName=BODY, fontSize=9.5, leading=15,
+                       leftIndent=18, firstLineIndent=-18, spaceAfter=2)
 
 
 def blank_text(label, hint=None, length=22):
-    """留空占位：灰色提示 + 下划线。"""
     h = f"<font color='#999999'>{esc_all(hint)}</font>" if hint else ""
     line = "＿" * length
     return f"{esc_all(label)}：{h}{line}"
 
 
+def cover_blank(label, length=12):
+    return f"{esc_all(label)}：{'＿' * length}"
+
+
 def render_block(block):
-    """把单个 block 转成 platypus flowable 列表。"""
     out = []
     t = block.get("type")
 
     if t == "p":
         out.append(Paragraph(esc_amp(block.get("text", "")), S_BODY))
+
+    elif t == "subheading":
+        out.append(Paragraph(esc_all(block.get("text", "")), S_SUBHEADING))
 
     elif t == "ul":
         for item in block.get("items", []):
@@ -120,7 +145,35 @@ def render_block(block):
             out.append(Paragraph(f"{i}. " + esc_amp(item), S_LIST))
 
     elif t == "formula":
-        out.append(Paragraph(esc_amp(block.get("text", "")), S_FORMULA))
+        text = esc_amp(block.get("text", ""))
+        num = block.get("num")
+        if num:
+            tbl = Table([[Paragraph(text, S_FORMULA_CELL),
+                          Paragraph(f"({num})", S_FORMULA_NUM)]],
+                        colWidths=[USABLE_W - 50, 50], hAlign="CENTER")
+            tbl.setStyle(TableStyle([
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ]))
+            out.append(tbl)
+        else:
+            out.append(Paragraph(text, S_FORMULA))
+
+    elif t == "note":
+        title = block.get("title", "注意")
+        p = Paragraph(f"【{esc_all(title)}】{esc_all(block.get('text', ''))}", S_NOTE)
+        tbl = Table([[p]], colWidths=[USABLE_W])
+        tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#FFF8E1")),
+            ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#ddcf8f")),
+            ("LEFTPADDING", (0, 0), (-1, -1), 10),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+            ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ]))
+        out.append(tbl)
+        out.append(Spacer(1, 6))
 
     elif t == "blank":
         out.append(Paragraph(blank_text(block.get("label", "待填写"),
@@ -146,6 +199,10 @@ def render_block(block):
             if headers:
                 style.append(("BACKGROUND", (0, 0), (-1, 0),
                               colors.HexColor("#EEEEEE")))
+            for ri in range(1, len(data)):
+                if ri % 2 == 0:
+                    style.append(("BACKGROUND", (0, ri), (-1, ri),
+                                  colors.HexColor("#FAFAFA")))
             tb.setStyle(TableStyle(style))
             out.append(tb)
             out.append(Spacer(1, 6))
@@ -170,8 +227,8 @@ def render_block(block):
                     f"<font color='red'>[图片加载失败: {esc_all(str(e))}]</font>",
                     S_CAPTION))
         else:
-            out.append(Paragraph(
-                blank_text("图", block.get("caption", "图片")), S_BODY))
+            out.append(Paragraph(blank_text("图", block.get("caption", "图片")),
+                                 S_BODY))
 
     elif t == "spacer":
         out.append(Spacer(1, float(block.get("height", 6))))
@@ -179,12 +236,48 @@ def render_block(block):
     return out
 
 
-def footer(canvas, doc):
-    canvas.saveState()
-    canvas.setFont("SimSun", 9)
-    canvas.setFillColor(colors.HexColor("#888888"))
-    canvas.drawCentredString(PAGE_W / 2.0, 36, f"第 {doc.page} 页")
-    canvas.restoreState()
+def render_cover(title, course, meta):
+    story = []
+    story.append(Spacer(1, 70))
+    if course:
+        story.append(Paragraph(spaced(course), S_COVER_COURSE))
+        story.append(Spacer(1, 40))
+    story.append(Paragraph(spaced(title), S_COVER_TITLE))
+    story.append(Spacer(1, 70))
+    keys = ["实验者姓名", "同组者姓名", "实验日期"]
+    if "指导教师" in meta:
+        keys.append("指导教师")
+    for k in keys:
+        v = meta.get(k, "")
+        if v:
+            story.append(Paragraph(f"{esc_all(k)}：{esc_all(v)}", S_COVER_META))
+        else:
+            story.append(Paragraph(cover_blank(k), S_COVER_META))
+    story.append(PageBreak())
+    return story
+
+
+def render_abstract(abstract, keywords):
+    out = []
+    inner = []
+    if abstract:
+        inner.append(Paragraph("【摘要】" + esc_all(abstract), S_ABSTRACT))
+    if keywords:
+        inner.append(Paragraph("【关键词】" + "；".join(esc_all(k) for k in keywords),
+                               S_KEYWORDS))
+    if inner:
+        tbl = Table([[b] for b in inner], colWidths=[USABLE_W])
+        tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F7F7F7")),
+            ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
+            ("LEFTPADDING", (0, 0), (-1, -1), 10),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+            ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ]))
+        out.append(tbl)
+        out.append(Spacer(1, 8))
+    return out
 
 
 def build(input_path, output_path):
@@ -192,40 +285,35 @@ def build(input_path, output_path):
         data = json.load(f)
 
     title = data.get("title", "实验报告")
+    course = data.get("course", "")
     meta = data.get("meta", {})
+    abstract = data.get("abstract", "")
+    keywords = data.get("keywords", [])
+    references = data.get("references", [])
 
     doc = SimpleDocTemplate(output_path, pagesize=A4,
                             leftMargin=LEFT, rightMargin=RIGHT,
                             topMargin=TOP, bottomMargin=BOTTOM,
                             title=title)
+
+    def onpage(canvas, doc_):
+        canvas.saveState()
+        if doc_.page > 1:
+            canvas.setFont(KAI, 9)
+            canvas.setFillColor(colors.HexColor("#777777"))
+            canvas.drawCentredString(PAGE_W / 2.0, PAGE_H - 40, title)
+            canvas.setStrokeColor(colors.HexColor("#cccccc"))
+            canvas.setLineWidth(0.5)
+            canvas.line(LEFT, PAGE_H - 48, PAGE_W - RIGHT, PAGE_H - 48)
+        canvas.setFont("SimSun", 9)
+        canvas.setFillColor(colors.HexColor("#888888"))
+        canvas.drawCentredString(PAGE_W / 2.0, 36, f"第 {doc_.page} 页")
+        canvas.restoreState()
+
     story = []
+    story += render_cover(title, course, meta)
+    story += render_abstract(abstract, keywords)
 
-    # 标题
-    story.append(Paragraph(esc_all(title), S_TITLE))
-    story.append(Spacer(1, 4))
-
-    # 元信息（姓名 / 同组 / 日期）：居中两行
-    def meta_pair(label, key):
-        v = meta.get(key, "")
-        if v:
-            return f"{esc_all(label)}：{esc_all(v)}"
-        return blank_text(label, "待填写", length=10)
-
-    story.append(Paragraph(
-        meta_pair("实验者姓名", "实验者姓名") + "　　" +
-        meta_pair("同组者姓名", "同组者姓名"), S_META))
-    story.append(Paragraph(meta_pair("实验日期", "实验日期"), S_META))
-    story.append(Spacer(1, 6))
-
-    # 分隔线
-    story.append(Table([[""]], colWidths=[USABLE_W], rowHeights=[0.5],
-                       style=TableStyle([
-                           ("LINEBELOW", (0, 0), (-1, -1), 1,
-                            colors.HexColor("#000000")),
-                       ])))
-    story.append(Spacer(1, 4))
-
-    # 各章节
     for sec in data.get("sections", []):
         heading = sec.get("heading", "")
         if heading:
@@ -233,7 +321,12 @@ def build(input_path, output_path):
         for block in sec.get("blocks", []):
             story.extend(render_block(block))
 
-    doc.build(story, onFirstPage=footer, onLaterPages=footer)
+    if references:
+        story.append(Paragraph("参考文献", S_HEADING))
+        for r in references:
+            story.append(Paragraph(esc_all(r), S_REF))
+
+    doc.build(story, onFirstPage=onpage, onLaterPages=onpage)
     return output_path
 
 
